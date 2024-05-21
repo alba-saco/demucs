@@ -30,7 +30,7 @@ from dora.log import fatal
 from pathlib import Path
 from typing import Optional, Callable, Dict, Tuple, Union
 
-from .apply import apply_model, _replace_dict
+from .apply import apply_model, apply_model_preprocess, _replace_dict
 from .audio import AudioFile, convert_audio, save_audio
 from .pretrained import get_model, _parse_remote_files, REMOTE_ROOT
 from .repo import RemoteRepo, LocalRepo, ModelOnlyRepo, BagOnlyRepo
@@ -290,6 +290,57 @@ class Separator:
         wav *= ref.std() + 1e-8
         wav += ref.mean()
         return (wav, dict(zip(self._model.sources, out[0])))
+    
+    def get_padded_mix_from_tensor(
+        self, wav: th.Tensor, sr: Optional[int] = None
+    ) -> Tuple[th.Tensor, Dict[str, th.Tensor]]:
+        """
+        Separate a loaded tensor.
+
+        Parameters
+        ----------
+        wav: Waveform of the audio. Should have 2 dimensions, the first is each audio channel, \
+            while the second is the waveform of each channel. Type should be float32. \
+            e.g. `tuple(wav.shape) == (2, 884000)` means the audio has 2 channels.
+        sr: Sample rate of the original audio, the wave will be resampled if it doesn't match the \
+            model.
+
+        Returns
+        -------
+        A tuple, whose first element is the original wave and second element is a dict, whose keys
+        are the name of stems and values are separated waves. The original wave will have already
+        been resampled.
+
+        Notes
+        -----
+        Use this function with cautiousness. This function does not provide data verifying.
+        """
+        if sr is not None and sr != self.samplerate:
+            wav = convert_audio(wav, sr, self._samplerate, self._audio_channels)
+        ref = wav.mean(0)
+        wav -= ref.mean()
+        wav /= ref.std() + 1e-8
+        print("in get_padded_mix_from_tensor")
+        padded_mix, model, length = apply_model_preprocess(
+                self._model,
+                wav[None],
+                segment=self._segment,
+                shifts=self._shifts,
+                split=self._split,
+                overlap=self._overlap,
+                device=self._device,
+                num_workers=self._jobs,
+                callback=self._callback,
+                callback_arg=_replace_dict(
+                    self._callback_arg, ("audio_length", wav.shape[1])
+                ),
+                progress=self._progress
+            )
+        return padded_mix, model, length
+    
+    def get_padded_mix(self, file: Path):
+        print("in get_padded_mix")
+        return self.get_padded_mix_from_tensor(self._load_audio(file), self.samplerate)
 
     def separate_audio_file(self, file: Path):
         """
